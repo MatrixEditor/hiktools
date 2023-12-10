@@ -1,0 +1,27 @@
+[project]
+name = "hiktools"
+version = "1.2.2"
+description="Hikvision utility tools"
+authors = [
+  { name="MatrixEditor", email="not@supported.com" },
+]
+readme = "README.md"
+classifiers = [
+    'Development Status :: 5 - Production/Stable',
+    'Intended Audience :: Science/Research',
+    'License :: OSI Approved :: MIT License',
+    'Programming Language :: Python :: 3.6',
+    'Programming Language :: Python :: 3.7',
+    'Programming Language :: Python :: 3.8',
+    'Programming Language :: Python :: 3.9',
+    'Programming Language :: Python :: 3.10',
+  ]
+
+[project.urls]
+"Homepage" = "https://github.com/MatrixEditor/hiktools"
+"API-Docs" = "https://hiktools.readthedocs.io"
+"Native-API-Docs" = "https://matrixeditor.github.io/hiktools/docs/html/d3/dcc/md__r_e_a_d_m_e.html"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hiktools*"]
