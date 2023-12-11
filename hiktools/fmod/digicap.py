@@ -226,7 +226,7 @@ def fopen_dav(file_name: str, mode: str = "rb") -> IOBase:
         raise ValueError("Expected a reading mode.")
 
     try:
-        res = open(file_name, mode)  # noqa
+        res = open(file_name, mode)  #:noqa
     except OSError as open_error:
         raise FileAccessException(open_error) from open_error
 

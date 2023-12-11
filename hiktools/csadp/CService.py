@@ -35,15 +35,15 @@ from sys import platform
 # Check if the program is running with root priviledges
 if platform != "linux":
     raise OSError("Unsupported platform for layer II network operations!")
-else:
-    try:
-        import os
 
-        if os.getuid():
-            raise PermissionError("This library requires super-user priviledges.")
+try:
+    import os
 
-    except AttributeError as exc:
-        raise PermissionError("This library requires super-user priviledges.") from exc
+    if os.getuid():
+        raise PermissionError("This library requires super-user priviledges.")
+
+except AttributeError as exc:
+    raise PermissionError("This library requires super-user priviledges.") from exc
 
 
 def l2socket(interface: str) -> socket.socket:
