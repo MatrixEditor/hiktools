@@ -22,3 +22,15 @@
 
 from hiktools.fmod.digicap import *
 from hiktools.fmod.export import *
+from hiktools.fmod.crypto import (
+    gen_aes_key,
+    decrypt_aes_ecb,
+    try_platform_keys,
+    KNOWN_FILE_NAMES,
+)
+from hiktools.fmod.keys import (
+    PLATFORM_KEYS,
+    find_platform_key,
+    list_known_platforms,
+)
+from hiktools.fmod.hikpack import extract_keys, iter_records

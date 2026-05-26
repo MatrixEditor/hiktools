@@ -26,7 +26,12 @@ from hiktools.fmod.digicap import DigiCap, FileAccessException
 
 
 def export(dfile: DigiCap, location: str) -> bool:
-    """Extracts all files stored in the given digicap file."""
+    """Extracts all files stored in the given digicap file.
+
+    HKWS payloads are written as read. HK20/HK30 payloads are decrypted with
+    the file-payload AES key for the platform that decoded the HK30 header.
+    Falls back to writing the raw bytes if no platform has been identified.
+    """
     if location is None or dfile is None:
         raise ValueError("Input file or location is null")
 
@@ -36,10 +41,21 @@ def export(dfile: DigiCap, location: str) -> bool:
     except OSError as error:
         raise FileAccessException(error) from error
 
+    file_key = None
+    if dfile.platform is not None:
+        from hiktools.fmod.crypto import gen_aes_key, decrypt_aes_ecb
+        from hiktools.fmod.keys import PLATFORM_KEYS
+        seeds = PLATFORM_KEYS.get(dfile.platform)
+        if seeds is not None:
+            file_key = gen_aes_key(seeds["file"])
+
     for fname, flen, fpos, _ in dfile:
         try:
+            payload = dfile.fread(flen, fpos)
+            if file_key is not None:
+                payload = decrypt_aes_ecb(payload, file_key)[:flen]
             with open(str(path / fname), "wb") as exp_file:
-                exp_file.write(dfile.fread(flen, fpos))
+                exp_file.write(payload)
         except OSError as err:
             print(str(err))
             return False

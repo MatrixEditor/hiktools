@@ -20,14 +20,26 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 """
-Decryption module of hikvision firmware files. Note that newer files aren't supported
-yet as there is a new decryption key needed.
+Decryption module of hikvision firmware files.
 
-The basic process of decrpytion os the following:
+Two on-disk formats are handled:
+
+* HKWS / single-layer XOR (older 5.3.x and below). Decryption uses only the
+  outer XOR key in :data:`DigiCap.KEY_XOR`.
+* HK20 / HK30 (5.4.x and newer). After the same outer XOR layer there is a
+  second HK30 section encrypted with AES-256-ECB. The platform key is looked
+  up from :mod:`hiktools.fmod.keys` and the AES stage is performed by
+  :mod:`hiktools.fmod.crypto`. If no registered platform key fits the sample,
+  the file table is left empty and a warning is logged. Platforms newer than
+  ``0x85`` (device-id prefix 138 and above) do not currently have public keys
+  and must be recovered from a running device.
+
+The basic process of decryption is the following:
     - Read the raw header (first 108 bytes)
     - Decode the header XOR with the decryption key
     - Parse the header
     - Decode the rest of the firmware file XOR with the decryption key
+    - For HK20 files, locate the HK30 section and decrypt it with AES
     - Parse the embedded files
 """
 from __future__ import annotations
@@ -396,24 +408,129 @@ class DigiCap:
             self._file.seek(offset)
         return self._file.read(length)
 
+    # Outer-header magic values, as parsed by uint32 little-endian.
+    # "HKWS" -> 0x53574B48, "02KH" -> 0x484B3230, "03KH" -> 0x484B3330.
+    # HKWS firmware is single-layer XOR; HK20 firmware contains a second
+    # HK30 AES section beyond the XOR layer.
+    MAGIC_HKWS = 0x53574B48
+    MAGIC_HK20 = 0x484B3230
+    MAGIC_HK30 = 0x484B3330
+
     def fparse(self):
         """Parses the firmware file."""
-        if self._file is not None:
-            raw_head = read_raw_header(self._file)
-            decoded_head = decode_xor16(raw_head, self.KEY_XOR, 0x6C)
-
-            self._head = split_header(decoded_head)
-            self.reset()
-            raw_data = decode_xor16(
-                self._file.read(self.head.header_length),
-                self.KEY_XOR,
-                self.head.header_length,
-            )
-            self._filelist = list(split_files(raw_data))
-            if len(self) == 0:
-                logger.warning("Could not decode firmware - detected 0 files!")
-        else:
+        if self._file is None:
             raise ValueError("Input source is None.")
+
+        raw_head = read_raw_header(self._file)
+        decoded_head = decode_xor16(raw_head, self.KEY_XOR, 0x6C)
+
+        self._head = split_header(decoded_head)
+        self.reset()
+        raw_data = decode_xor16(
+            self._file.read(self.head.header_length),
+            self.KEY_XOR,
+            self.head.header_length,
+        )
+        self._filelist = list(split_files(raw_data))
+        self._platform = None
+
+        if len(self) == 0 and self.head.magic == self.MAGIC_HK20:
+            # HK20 outer header had no file entries inline -- the table
+            # lives inside the AES-encrypted HK30 section that follows.
+            self._fparse_hk30()
+
+        if len(self) == 0:
+            logger.warning("Could not decode firmware - detected 0 files!")
+
+    def _fparse_hk30(self):
+        """Locate and decrypt the HK30 section that follows an HK20 header."""
+        # Lazy imports keep the XOR-only fast path import-light.
+        from hiktools.fmod.crypto import decrypt_aes_ecb, gen_aes_key, KNOWN_FILE_NAMES
+        from hiktools.fmod.keys import PLATFORM_KEYS
+
+        h1_size = self.head.header_length
+
+        self._file.seek(h1_size)
+        h2_xor = self._file.read(16)
+        if len(h2_xor) < 16:
+            logger.warning("Truncated HK30 section, refusing to decode")
+            return
+
+        h2_head = decode_xor16(h2_xor, self.KEY_XOR, 16)
+        h2_magic = uint32(h2_head[:4])
+        if h2_magic != self.MAGIC_HK30:
+            logger.warning("Expected HK30 marker after HK20 header, got 0x%08x", h2_magic)
+            return
+
+        h2_size = uint32(h2_head[8:12])
+        h2_body = self._file.read(h2_size)
+        if not h2_body:
+            return
+
+        for name, seeds in PLATFORM_KEYS.items():
+            key = gen_aes_key(seeds["header"])
+            plain = decrypt_aes_ecb(h2_body, key)
+            if not any(fname in plain for fname in KNOWN_FILE_NAMES):
+                continue
+
+            self._platform = name
+            logger.info("HK30 section decrypted with platform key %r", name)
+            self._filelist = list(self._iter_hk30_entries(plain, h1_size))
+            return
+
+        logger.warning(
+            "HK30 section present but no registered platform key fits; "
+            "newer platforms may need keys recovered from a live device"
+        )
+
+    @staticmethod
+    def _iter_hk30_entries(plain: bytes, h1_size: int):
+        """Yield file-table entries from a decrypted HK30 body.
+
+        Two layouts have been observed in the wild. Try the chenx6-style
+        fixed offset first (0xF0 + 0x40 stride) and fall back to a string
+        scan if that produces nothing useful.
+        """
+        entries = []
+        for off in range(0xF0, len(plain) - 0x2C, 0x40):
+            name_bytes = plain[off:off + 0x20]
+            try:
+                null = name_bytes.index(b"\x00")
+            except ValueError:
+                continue
+            name = name_bytes[:null]
+            if not name or not all(0x20 <= b <= 0x7E for b in name):
+                continue
+            offset = uint32(plain[off + 0x20:off + 0x24])
+            length = uint32(plain[off + 0x24:off + 0x28])
+            checksum = uint32(plain[off + 0x28:off + 0x2C])
+            entries.append((name.decode("ascii"), length, offset + h1_size, checksum))
+
+        if entries:
+            yield from entries
+            return
+
+        # Fallback: locate known names in the plaintext and align to the
+        # nearest 0x20 boundary to read the surrounding entry struct.
+        from hiktools.fmod.crypto import KNOWN_FILE_NAMES
+        seen = set()
+        for needle in KNOWN_FILE_NAMES:
+            pos = plain.find(needle)
+            if pos < 0:
+                continue
+            entry_start = pos - (pos % 0x20)
+            if entry_start + 0x2C > len(plain) or entry_start in seen:
+                continue
+            seen.add(entry_start)
+            name_bytes = plain[entry_start:entry_start + 0x20].replace(b"\x00", b"")
+            try:
+                name = name_bytes.decode("ascii")
+            except UnicodeDecodeError:
+                continue
+            offset = uint32(plain[entry_start + 0x20:entry_start + 0x24])
+            length = uint32(plain[entry_start + 0x24:entry_start + 0x28])
+            checksum = uint32(plain[entry_start + 0x28:entry_start + 0x2C])
+            yield name, length, offset + h1_size, checksum
 
     @property
     def name(self) -> str:
@@ -424,6 +541,15 @@ class DigiCap:
     def head(self) -> DigiCapHeader:
         """The header object storing important configuration data."""
         return self._head
+
+    @property
+    def platform(self) -> str | None:
+        """Name of the platform key that decrypted the HK30 section, if any.
+
+        ``None`` for HKWS firmware (no AES layer) and for HK20 firmware whose
+        platform key is not registered in :mod:`hiktools.fmod.keys`.
+        """
+        return getattr(self, "_platform", None)
 
     def __enter__(self) -> "DigiCap":
         self.fparse()
